@@ -42,7 +42,7 @@ cargo tauri android build --debug --apk --target aarch64
 
 The APK lands at `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`. It is signed with the Android debug key; `apksigner verify --print-certs` reports `CN=Android Debug`. For an emulator, replace `aarch64` with `x86_64` and install the same path with `adb install -r`.
 
-Measured on 2026-11-05 on Linux x86_64 with 22 cores and warm SDK, Gradle and cargo caches: 1m43s for the `aarch64` debug APK with iroh in `target/`, 1m14s for the `x86_64` one, and a 127 MiB APK with debug symbols. The SDK, NDK, JDK, Gradle and Rust caches took about 12 GB. On an Android 17 x86_64 emulator the app started, the debug screen showed its `http://localhost:PORT/` proxy URL, and after entering the endpoint ID, the relay URL and a throwaway fleet ID it showed that real Board's pair page through the proxy, with the Board printing the phone's `iroh:` endpoint ID.
+Measured on 2026-11-05 on Linux x86_64 with 22 cores and warm SDK, Gradle and cargo caches: 1m36s for the `aarch64` debug APK with iroh in `target/`, 1m14s for the `x86_64` one, and a 127 MiB APK with debug symbols. The SDK, NDK, JDK, Gradle and Rust caches took about 12 GB. On an Android 17 x86_64 emulator the app started, the debug screen showed its `http://localhost:PORT/` proxy URL, and after entering the endpoint ID, the relay URL and a throwaway fleet ID it showed that real Board's pair page through the proxy, with the Board printing the phone's `iroh:` endpoint ID.
 
 ## Host tests
 

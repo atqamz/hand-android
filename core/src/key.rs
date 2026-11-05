@@ -20,12 +20,15 @@ pub fn load_or_create(data_dir: &Path) -> io::Result<SecretKey> {
         found => return found,
     }
     let key = SecretKey::generate();
-    match create_private(&path) {
-        Ok(mut file) => {
-            file.write_all(&key.to_bytes())?;
-            file.sync_all()?;
-            Ok(key)
-        }
+    let temp = dir.join(format!("{KEY_FILE}.{}.tmp", key.public().fmt_short()));
+    let written = create_private(&temp).and_then(|mut file| {
+        file.write_all(&key.to_bytes())?;
+        file.sync_all()
+    });
+    let linked = written.and_then(|()| fs::hard_link(&temp, &path));
+    let _ = fs::remove_file(&temp);
+    match linked {
+        Ok(()) => Ok(key),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => read(&path),
         Err(error) => Err(error),
     }

@@ -40,7 +40,7 @@ function offer(view) {
   clearTimer();
   backoff = 1000;
   error.textContent = "";
-  status.textContent = "";
+  status.textContent = view.notice || "";
   laptop.textContent = view.laptop;
   paste.hidden = true;
   confirm.hidden = false;
@@ -101,7 +101,12 @@ async function pair() {
 async function intake() {
   try {
     const view = await invoke("intake_intent");
-    if (view) offer(view);
+    if (view) {
+      offer(view);
+      return;
+    }
+    const board = await invoke("open_board");
+    if (board) window.location.href = board;
   } catch (failure) {
     failed(failure);
   }

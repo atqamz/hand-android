@@ -100,6 +100,10 @@ impl fmt::Display for Reject {
 impl std::error::Error for Reject {}
 
 pub fn parse_link(text: &str) -> Result<Link, Reject> {
+    parse_link_with(text, |_| true)
+}
+
+pub fn parse_link_with(text: &str, endpoint_ok: impl Fn(&str) -> bool) -> Result<Link, Reject> {
     if text.len() > MAX_LEN {
         return Err(Reject::TooLong);
     }
@@ -154,7 +158,7 @@ pub fn parse_link(text: &str) -> Result<Link, Reject> {
         return Err(Reject::MissingKey);
     };
 
-    if !valid_endpoint(endpoint_id) {
+    if !valid_endpoint(endpoint_id) || !endpoint_ok(endpoint_id) {
         return Err(Reject::EndpointId);
     }
     if !valid_fleet(fleet) {

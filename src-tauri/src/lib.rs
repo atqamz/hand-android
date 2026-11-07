@@ -1,19 +1,24 @@
 mod mobile;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use hand_android_core::{Companion, CompanionConfig, ConfirmError, OpenError, Reject};
+use hand_android_core::{
+    Companion, CompanionConfig, ConfirmError, OfferError, OpenError, PAIRING_PENDING,
+};
 use tauri::Manager;
 
 struct AppState {
     companion: Arc<Companion>,
     lost: AtomicU32,
+    launch: AtomicBool,
 }
 
 #[derive(serde::Serialize)]
 struct OfferView {
     laptop: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<&'static str>,
 }
 
 #[derive(serde::Serialize)]
@@ -23,9 +28,9 @@ struct Failure {
 }
 
 impl Failure {
-    fn rejected(reject: Reject) -> Self {
+    fn rejected(error: OfferError) -> Self {
         Self {
-            message: reject.message().to_owned(),
+            message: error.message().to_owned(),
             retry: false,
         }
     }
@@ -71,11 +76,17 @@ async fn intake_intent(
     let Some(link) = link else {
         return Ok(None);
     };
+    state.launch.store(false, Ordering::Relaxed);
     match state.companion.offer_link(&link) {
         Ok(offer) => Ok(Some(OfferView {
             laptop: offer.laptop,
+            notice: None,
         })),
-        Err(reject) => Err(Failure::rejected(reject)),
+        Err(OfferError::Pending) => Ok(state.companion.pending_offer().map(|offer| OfferView {
+            laptop: offer.laptop,
+            notice: Some(PAIRING_PENDING),
+        })),
+        Err(error) => Err(Failure::rejected(error)),
     }
 }
 
@@ -87,7 +98,20 @@ fn offer_link(state: tauri::State<'_, AppState>, text: String) -> Result<OfferVi
         .map_err(Failure::rejected)?;
     Ok(OfferView {
         laptop: offer.laptop,
+        notice: None,
     })
+}
+
+#[tauri::command]
+async fn open_board(state: tauri::State<'_, AppState>) -> Result<Option<String>, Failure> {
+    if !state.launch.swap(false, Ordering::Relaxed) {
+        return Ok(None);
+    }
+    state
+        .companion
+        .open_board()
+        .await
+        .map_err(|error| failure(error, &state.lost))
 }
 
 #[tauri::command]
@@ -189,6 +213,7 @@ pub fn run() {
             app.manage(AppState {
                 companion: Arc::new(companion),
                 lost: AtomicU32::new(0),
+                launch: AtomicBool::new(true),
             });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -209,6 +234,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             intake_intent,
             offer_link,
+            open_board,
             cancel_pairing,
             confirm_pairing,
             forget_laptop

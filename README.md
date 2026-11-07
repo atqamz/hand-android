@@ -57,9 +57,9 @@ cargo build --locked --manifest-path hand/iroh/Cargo.toml --bin hand-iroh
 HAND_IROH_BIN="$PWD/hand/iroh/target/debug/hand-iroh" cargo test --locked --workspace
 ```
 
-Without `HAND_IROH_BIN` the 13 sidecar tests print a skip and return; CI always sets it. The suite proves a proxied HTTP request and response, half-close in both directions, stream codes 3, 4 and 5, connection codes 1 and 2, the 13th stream waiting, a stream opening only on its first byte, a Board that answers before it closes while the phone still sends, and a wrong secret ending a stream with no byte. It also covers the backoff after a full laptop, the key's file and folder permissions, the port kept across a restart, the relay hint, the pairing link parser over the contract's 13 valid and 73 invalid vectors, the confirmation text, the open URL, and the clear-before-forget order of a second laptop.
+Without `HAND_IROH_BIN` the 13 sidecar tests print a skip and return; CI always sets it. The suite proves a proxied HTTP request and response, half-close in both directions, stream codes 3, 4 and 5, connection codes 1 and 2, the 13th stream waiting, a stream opening only on its first byte, a Board that answers before it closes while the phone still sends, and a wrong secret ending a stream with no byte. It also covers the backoff after a full laptop, the key's file and folder permissions, the port kept across a restart, the relay hint, the pairing link parser over the contract's 13 valid and 73 invalid vectors, the confirmation text, the open URL, the pending link kept against a second one, the iroh key checked before the other fields, the clear-before-forget order of a second laptop, and the Board opened from the saved laptop on a relaunch.
 
-Measured on 2026-11-07 on the same host, debug builds through loopback: 39 tests, 13 of them against the sidecar; slowest time to first byte of three proxied requests 70-76 ms; the first stream after a full laptop connected 1.10-1.21 s after the request, which is the 1-second backoff.
+Measured on 2026-11-07 on the same host, debug builds through loopback: 44 tests, 13 of them against the sidecar; slowest time to first byte of three proxied requests 70-76 ms; the first stream after a full laptop connected 1.10-1.21 s after the request, which is the 1-second backoff.
 
 The standard checks are:
 
@@ -81,11 +81,11 @@ export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$toolchain/aarch64-linux-andro
 
 ## Pairing
 
-A link arrives from the `handboard://` intent or from the paste field on the first screen. The app trims surrounding whitespace and applies the contract's 15 checks before it accepts anything. It then shows the first four and last four characters of the laptop's endpoint ID and asks for confirmation. A link that arrives while a pairing is open replaces nothing until the user confirms. The code is never shown.
+A link arrives from the `handboard://` intent or from the paste field on the first screen. The app trims surrounding whitespace and applies the contract's 15 checks before it accepts anything. It then shows the first four and last four characters of the laptop's endpoint ID and asks for confirmation. A link that arrives while a pairing is open replaces nothing until the user confirms; the app says `Finish or dismiss the current pairing first` and keeps the first link. The code is never shown.
 
 After confirmation the app dials, checks that the Board answers, and loads `http://localhost:PORT/<fleet>/pair#<code>`. The host is the name `localhost`, never an IP. The user types the phone's name on the Board's page and taps its button; the app never submits the form.
 
-Pairing a second laptop first clears the web view's cookies and storage and forgets the first. The last endpoint ID is kept in `<app data>/laptop`; it is not a secret.
+Pairing a second laptop first clears the web view's cookies and storage and forgets the first. The last endpoint ID is kept in `<app data>/laptop`; it is not a secret. On a later launch the app dials it and opens `http://localhost:PORT/`, where the Board's cookie picks the fleet.
 
 The pairing screen and the pair page set `FLAG_SECURE`, so screenshots, recents thumbnails and screen recording do not capture the code.
 
@@ -102,7 +102,7 @@ If the Board answers with its login page, a pairing page, or a refusal such as "
 - `iroh` 1.4.1 and `tokio` 1.54.1: the dialer and its runtime, pinned to the sidecar's versions.
 - `rand` 0.10.3: the proxy port and the backoff jitter; the standard library has no random source.
 - `serde` 1.0.229: the shell's command replies and errors; Tauri cannot return a custom type without it.
-- `serde_json` 1.0.154, tests only: reads the contract's vectors.
+- `serde_json` 1.0.154: `tauri::generate_context!` expands to code that names it in the shell; the core's tests also read the contract's vectors with it.
 - `socket2` 0.6.5, tests only: sets `SO_LINGER` so the fixture Board can send the reset that becomes code 5.
 - `tauri` 2.12.5 and `tauri-build` 2.7.4: the Android shell and its build script, pinned with `tauri-cli` 2.12.4.
 

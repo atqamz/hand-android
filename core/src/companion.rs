@@ -11,10 +11,10 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::time::timeout;
 
-use crate::dialer::{ALPN, Dialer, OpenError, STREAMS_PER_CONNECTION};
+use crate::dialer::{ALPN, Dialer, OpenError, STREAMS_PER_CONNECTION, parse_target};
 use crate::key;
-use crate::link::{LINK_REJECTED, Reject};
-use crate::pairing::{Offer, Pairing};
+use crate::link::LINK_REJECTED;
+use crate::pairing::{Offer, OfferError, Pairing};
 use crate::proxy::{self, Proxy, Signal};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,8 +68,25 @@ impl Companion {
         self.port
     }
 
-    pub fn offer_link(&self, text: &str) -> Result<Offer, Reject> {
+    pub fn offer_link(&self, text: &str) -> Result<Offer, OfferError> {
         self.pairing.lock().unwrap().offer(text.trim())
+    }
+
+    pub fn pending_offer(&self) -> Option<Offer> {
+        self.pairing.lock().unwrap().pending_offer()
+    }
+
+    pub async fn open_board(&self) -> Result<Option<String>, ConfirmError> {
+        let active = {
+            let pairing = self.pairing.lock().unwrap();
+            pairing.active().map(str::to_owned)
+        };
+        let Some(active) = active else {
+            return Ok(None);
+        };
+        let target = parse_target(&active, None).map_err(ConfirmError::Target)?;
+        self.dialer.set_target(Some(target)).await;
+        Ok(Some(format!("http://localhost:{}/", self.port)))
     }
 
     pub fn cancel_pairing(&self) {
@@ -112,6 +129,7 @@ impl Companion {
         self.dialer.set_target(Some(target)).await;
         self.dialer.attempt().await?;
         self.probe_pair_page(&link.fleet).await?;
+        self.pairing.lock().unwrap().clear_pending();
         Ok(link.open_url(self.port))
     }
 
@@ -212,6 +230,7 @@ mod tests {
     use crate::testutil::TempDir;
 
     const LINK: &str = "handboard://c#v=1&e=4d92adf6fd9076ddd383c22e08f6ac6fb0ce48210b69c0f954e7e199b4d96ed6&f=f0123456789ab&c=K7QM3XRD2P";
+    const SECOND_LINK: &str = "handboard://c#v=1&e=d6e458a66697094c1bc7b54cb83fea66a8db57c49f37514944579712cd7e43c5&f=fa1b2c3d4e5f6&c=0123456789";
 
     #[tokio::test]
     async fn offering_a_link_dials_nothing_until_confirmed() {
@@ -224,5 +243,57 @@ mod tests {
         let offer = companion.offer_link(LINK).unwrap();
         assert_eq!(offer.laptop, "4d92…6ed6");
         assert!(companion.dialer.target().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_second_link_keeps_the_pending_confirmation() {
+        let dir = TempDir::new();
+        let companion = Companion::start(CompanionConfig {
+            data_dir: dir.path().to_owned(),
+        })
+        .await
+        .unwrap();
+        let first = companion.offer_link(LINK).unwrap();
+        assert_eq!(
+            companion.offer_link(SECOND_LINK).unwrap_err(),
+            OfferError::Pending
+        );
+        assert_eq!(companion.pending_offer().unwrap().laptop, first.laptop);
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_without_a_laptop_stays_on_the_pairing_screen() {
+        let dir = TempDir::new();
+        let companion = Companion::start(CompanionConfig {
+            data_dir: dir.path().to_owned(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(companion.open_board().await.unwrap(), None);
+        assert!(companion.dialer.target().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_relaunch_with_a_saved_laptop_opens_the_board() {
+        let dir = TempDir::new();
+        let laptop = "4d92adf6fd9076ddd383c22e08f6ac6fb0ce48210b69c0f954e7e199b4d96ed6";
+        std::fs::write(dir.path().join("laptop"), format!("{laptop}\n")).unwrap();
+        let companion = Companion::start(CompanionConfig {
+            data_dir: dir.path().to_owned(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            companion.open_board().await.unwrap(),
+            Some(format!("http://localhost:{}/", companion.port()))
+        );
+        assert_eq!(
+            companion
+                .dialer
+                .target()
+                .await
+                .map(|target| target.id.to_string()),
+            Some(laptop.to_owned())
+        );
     }
 }

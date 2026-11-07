@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-use hand_android_core::{Companion, CompanionConfig, parse_target};
+#[cfg(target_os = "android")]
+mod keystore;
+
+#[cfg(target_os = "android")]
+use hand_android_core::CompanionConfig;
+use hand_android_core::{Companion, parse_target};
 use tauri::Manager;
 
 struct AppState {
@@ -50,14 +55,26 @@ fn valid_fleet(fleet: &str) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(keystore::plugin());
+    builder
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            let companion =
-                tauri::async_runtime::block_on(Companion::start(CompanionConfig { data_dir }))?;
-            app.manage(AppState {
-                companion: Arc::new(companion),
-            });
+            #[cfg(target_os = "android")]
+            {
+                let data_dir = app.path().app_data_dir()?;
+                let cipher = Arc::new(app.state::<keystore::KeystoreCipher>().inner().clone());
+                let companion =
+                    tauri::async_runtime::block_on(Companion::start(CompanionConfig {
+                        data_dir,
+                        cipher,
+                    }))?;
+                app.manage(AppState {
+                    companion: Arc::new(companion),
+                });
+            }
+            #[cfg(not(target_os = "android"))]
+            let _ = app;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

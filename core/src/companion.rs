@@ -1,16 +1,18 @@
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iroh::EndpointAddr;
 use iroh::endpoint::{Endpoint, QuicTransportConfig, VarInt, presets};
 
 use crate::dialer::{ALPN, Dialer, STREAMS_PER_CONNECTION};
-use crate::key;
+use crate::key::{self, KeyCipher};
 use crate::proxy::{self, Proxy};
 
 pub struct CompanionConfig {
     pub data_dir: PathBuf,
+    pub cipher: Arc<dyn KeyCipher>,
 }
 
 #[derive(Clone)]
@@ -22,7 +24,7 @@ pub struct Companion {
 impl Companion {
     pub async fn start(config: CompanionConfig) -> Result<Self, StartError> {
         std::fs::create_dir_all(&config.data_dir)?;
-        let secret_key = key::load_or_create(&config.data_dir)?;
+        let secret_key = key::load_or_create(&config.data_dir, config.cipher.as_ref())?;
         let transport = QuicTransportConfig::builder()
             .max_concurrent_bidi_streams(VarInt::from_u32(STREAMS_PER_CONNECTION as u32))
             .max_concurrent_uni_streams(VarInt::from_u32(0))

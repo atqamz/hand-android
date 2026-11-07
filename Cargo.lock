@@ -1603,6 +1603,7 @@ name = "hand-android"
 version = "0.1.0"
 dependencies = [
  "hand-android-core",
+ "serde",
  "tauri",
  "tauri-build",
 ]

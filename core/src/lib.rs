@@ -14,5 +14,5 @@ pub use dialer::{
     ALPN, BACKOFF_RESET, Dialer, HANDSHAKE_DEADLINE, Notice, OpenError, STREAMS_PER_CONNECTION,
     StreamRecv, StreamSend, parse_target,
 };
-pub use key::{key_path, load_or_create as load_or_create_key};
+pub use key::{CipherError, KeyCipher, key_path, load_or_create};
 pub use proxy::Proxy;

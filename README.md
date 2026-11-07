@@ -13,7 +13,7 @@ Android only. iOS is deferred and has no code here.
 ## Layout
 
 - `core/`: `hand-android-core`, plain Rust with no Tauri in it. It owns the key, the iroh endpoint, the one connection to a laptop, the loopback proxy and the close and reset handling. Its tests run on the host.
-- `src-tauri/`: the Tauri shell. It starts the core with the app's data directory and registers four commands: the proxy URL, this phone's endpoint ID, the last notice, and opening the Board.
+- `src-tauri/`: the Tauri shell. It starts the core with the app's data directory and the Keystore cipher, registers four commands (the proxy URL, this phone's endpoint ID, the last notice, and opening the Board), and holds the Kotlin Keystore plugin that seals and opens the identity.
 - `web/`: the bundled first screen. Static files, no build step, no npm.
 - `src-tauri/gen/android/`: the Android project. It was made once with `cargo tauri android init` and is edited by hand; running `init` again overwrites the edits.
 
@@ -57,9 +57,9 @@ cargo build --locked --manifest-path hand/iroh/Cargo.toml --bin hand-iroh
 HAND_IROH_BIN="$PWD/hand/iroh/target/debug/hand-iroh" cargo test --locked --workspace
 ```
 
-Without `HAND_IROH_BIN` the 13 sidecar tests print a skip and return; CI always sets it. The suite proves a proxied HTTP request and response, half-close in both directions, stream codes 3, 4 and 5, connection codes 1 and 2, the 13th stream waiting, a stream opening only on its first byte, a Board that answers before it closes while the phone still sends, and a wrong secret ending a stream with no byte. It also covers the backoff after a full laptop, the key's file and folder permissions, the port kept across a restart, and the relay hint.
+Without `HAND_IROH_BIN` the 13 sidecar tests print a skip and return; CI always sets it. The suite proves a proxied HTTP request and response, half-close in both directions, stream codes 3, 4 and 5, connection codes 1 and 2, the 13th stream waiting, a stream opening only on its first byte, a Board that answers before it closes while the phone still sends, and a wrong secret ending a stream with no byte. It also covers the backoff after a full laptop, the sealed key's lifecycle (one key across runs, concurrent first runs, a replaced Keystore key and a reinstall each making a new identity, corrupt ciphertext stopping with an error, and ciphertext and folder permissions), the port kept across a restart, and the relay hint.
 
-Measured on 2026-11-05 on the same host, debug builds through loopback: 25 tests, 13 of them against the sidecar; slowest time to first byte of three proxied requests 70-76 ms; the first stream after a full laptop connected 1.10-1.21 s after the request, which is the 1-second backoff.
+Measured on 2026-11-05 on the same host, debug builds through loopback: slowest time to first byte of three proxied requests 70-76 ms; the first stream after a full laptop connected 1.10-1.21 s after the request, which is the 1-second backoff. The suite is 27 tests, 13 of them against the sidecar.
 
 The standard checks are:
 
@@ -87,7 +87,8 @@ If the Board answers with its login page, a pairing page, or a refusal such as "
 
 ## Key, port and data
 
-- The phone's iroh key is made on first run at `<app data>/iroh/companion.key`, 32 bytes, mode 0600 in a folder of mode 0700 on Unix. Tauri's app data directory is private to the app on Android and the manifest sets `android:allowBackup="false"`, so a backup or device transfer does not copy the identity. It is not in the Android Keystore yet; that is still required before release.
+- The phone's iroh identity is 32 random bytes made on first run. The app seals them with AES-256-GCM under a non-exportable Android Keystore key (alias `io.github.atqamz.handcompanion.iroh`, hardware-backed when the phone has a TEE or StrongBox, `setUserAuthenticationRequired(false)`) and stores only the IV, ciphertext and tag at `<app data>/iroh/companion.key`, mode 0600 in a folder of mode 0700. The key is never written in the clear, logged, copied or exported; the core owns the 32 bytes and the endpoint, and the Kotlin plugin only asks the Keystore to seal and open bytes. A reinstall removes the file and the Keystore key together, so the Board sees a new phone. If the file survives and the Keystore key is gone or replaced, the app makes and seals a new identity instead of falling back to raw bytes; if the ciphertext is corrupt, it stops with a clear error. Tauri's app data directory is private to the app and the manifest sets `android:allowBackup="false"`, so a backup or device transfer copies neither.
+- The Keystore round trip is device-only. CI has no Android Keystore, so the host tests drive the lifecycle with a fake cipher: they do not prove key generation, hardware backing, or real AES-GCM sealing and opening. On a phone, `adb install -r` over the same build must keep the endpoint ID (the identity loads and opens), while `adb uninstall` followed by an install must show a new one (the file and Keystore key are both gone).
 - The proxy listens on `127.0.0.1` and, when the phone has it, `[::1]`, because the name `localhost` resolves to either. Its port is chosen once from 49152 to 65535 and kept in `<app data>/proxy.port`; if the port is taken at launch the app picks and keeps another. A fixed port keeps the page's origin and the Board's drafts across a restart.
 - The proxy never listens on a network address, adds no headers, and removes none. The web view's cookies stay in the web view.
 

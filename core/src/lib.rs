@@ -3,6 +3,7 @@ mod codes;
 mod companion;
 mod dialer;
 mod key;
+mod navigation;
 #[cfg(test)]
 mod testutil;
 
@@ -15,4 +16,5 @@ pub use dialer::{
     StreamRecv, StreamSend, parse_target,
 };
 pub use key::{key_path, load_or_create as load_or_create_key};
+pub use navigation::may_load;
 pub use proxy::Proxy;

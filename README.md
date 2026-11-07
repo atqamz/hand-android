@@ -2,7 +2,7 @@
 
 Reach a Hand Board from an Android phone over iroh.
 
-Status: roadmap steps 1 and 2 are built. The app keeps an iroh key, dials a laptop's endpoint ID with the ALPN `hand-board`, and shows the Board through a loopback proxy at `http://localhost:PORT`. Pairing over iroh, the QR scanner and release signing are not built, so a temporary debug field on the first screen takes the laptop's details by hand.
+Status: roadmap steps 1 and 2 are built. The app keeps an iroh key, dials a laptop's endpoint ID with the ALPN `hand-board`, and shows the Board through a loopback proxy at `http://localhost:PORT`. The web view loads the bundled page and that proxy origin only; every other address opens in the system browser. Pairing over iroh, the QR scanner and release signing are not built, so a temporary debug field on the first screen takes the laptop's details by hand.
 
 ## What it is
 
@@ -13,7 +13,7 @@ Android only. iOS is deferred and has no code here.
 ## Layout
 
 - `core/`: `hand-android-core`, plain Rust with no Tauri in it. It owns the key, the iroh endpoint, the one connection to a laptop, the loopback proxy and the close and reset handling. Its tests run on the host.
-- `src-tauri/`: the Tauri shell. It starts the core with the app's data directory and registers four commands: the proxy URL, this phone's endpoint ID, the last notice, and opening the Board.
+- `src-tauri/`: the Tauri shell. It starts the core with the app's data directory, registers three commands (the proxy URL, this phone's endpoint ID, and opening the Board), and keeps the web view on the bundled page and the proxy origin.
 - `web/`: the bundled first screen. Static files, no build step, no npm.
 - `src-tauri/gen/android/`: the Android project. It was made once with `cargo tauri android init` and is edited by hand; running `init` again overwrites the edits.
 
@@ -95,8 +95,10 @@ If the Board answers with its login page, a pairing page, or a refusal such as "
 
 - `iroh` 1.4.1 and `tokio` 1.54.1: the dialer and its runtime, pinned to the sidecar's versions.
 - `rand` 0.10.3: the proxy port and the backoff jitter; the standard library has no random source.
+- `url` 2.5.8: parses and compares the navigation URLs; the standard library has no URL parser, and it is the type Tauri hands the navigation callback.
 - `socket2` 0.6.5, tests only: sets `SO_LINGER` so the fixture Board can send the reset that becomes code 5.
 - `tauri` 2.12.5 and `tauri-build` 2.7.4: the Android shell and its build script, pinned with `tauri-cli` 2.12.4.
+- `tauri-plugin-opener` 2.7.2: sends a refused navigation to the Android system browser; neither the standard library nor Tauri starts that intent itself.
 
 `Cargo.lock` holds every transitive version.
 

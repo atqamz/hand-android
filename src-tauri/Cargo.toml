@@ -17,3 +17,4 @@ tauri-build = { version = "=2.7.4", features = [] }
 [dependencies]
 hand-android-core = { path = "../core" }
 tauri = { version = "=2.12.5", default-features = false, features = ["wry"] }
+tauri-plugin-opener = "=2.7.2"

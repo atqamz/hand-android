@@ -1604,6 +1604,7 @@ version = "0.1.0"
 dependencies = [
  "hand-android-core",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
 ]
@@ -1614,6 +1615,7 @@ version = "0.1.0"
 dependencies = [
  "iroh",
  "rand",
+ "serde_json",
  "socket2",
  "tokio",
 ]

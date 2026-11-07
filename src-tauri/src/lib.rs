@@ -1,92 +1,279 @@
-use std::sync::Arc;
+mod mobile;
 
 #[cfg(target_os = "android")]
 mod keystore;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 #[cfg(target_os = "android")]
 use hand_android_core::CompanionConfig;
-use hand_android_core::{Companion, parse_target};
+use hand_android_core::{Companion, ConfirmError, OfferError, OpenError, PAIRING_PENDING};
 use tauri::Manager;
 
 struct AppState {
     companion: Result<Arc<Companion>, String>,
+    lost: AtomicU32,
+    launch: AtomicBool,
 }
 
 impl AppState {
-    fn companion(&self) -> Result<Arc<Companion>, String> {
-        self.companion.clone()
+    fn companion(&self) -> Result<Arc<Companion>, Failure> {
+        self.companion.clone().map_err(|message| Failure {
+            message,
+            retry: false,
+        })
+    }
+}
+
+#[derive(serde::Serialize)]
+struct OfferView {
+    laptop: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notice: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct Failure {
+    message: String,
+    retry: bool,
+}
+
+impl Failure {
+    fn rejected(error: OfferError) -> Self {
+        Self {
+            message: error.message().to_owned(),
+            retry: false,
+        }
+    }
+}
+
+fn failure(error: ConfirmError, lost: &AtomicU32) -> Failure {
+    if matches!(error, ConfirmError::Open(OpenError::Lost)) {
+        let count = lost.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= 3 {
+            lost.store(0, Ordering::Relaxed);
+            return Failure {
+                message: "Can't reach your laptop.".to_owned(),
+                retry: false,
+            };
+        }
+        return Failure {
+            message: "Reconnecting…".to_owned(),
+            retry: true,
+        };
+    }
+    lost.store(0, Ordering::Relaxed);
+    Failure {
+        message: error.message().to_owned(),
+        retry: error.retry(),
     }
 }
 
 #[tauri::command]
-fn proxy_url(state: tauri::State<AppState>) -> Result<String, String> {
-    Ok(state.companion()?.url("/"))
-}
-
-#[tauri::command]
-fn phone_endpoint_id(state: tauri::State<AppState>) -> Result<String, String> {
-    Ok(state.companion()?.endpoint_id().to_string())
-}
-
-#[tauri::command]
-async fn open_board(
+async fn intake_intent(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    endpoint_id: String,
-    relay: Option<String>,
-    fleet: Option<String>,
-) -> Result<String, String> {
-    let companion = state.companion()?;
-    let target = parse_target(&endpoint_id, relay.as_deref())?;
-    let path = match fleet.map(|fleet| fleet.trim().to_owned()) {
-        Some(fleet) if !fleet.is_empty() => {
-            if !valid_fleet(&fleet) {
-                return Err(
-                    "the fleet ID must be f and 12 lowercase hexadecimal characters".to_owned(),
-                );
-            }
-            format!("/{fleet}/pair")
-        }
-        _ => "/".to_owned(),
+) -> Result<Option<OfferView>, Failure> {
+    #[cfg(target_os = "android")]
+    let link = match app.try_state::<mobile::Bridge>() {
+        Some(bridge) => bridge.take_link().await,
+        None => None,
     };
-    companion.set_target(Some(target)).await;
-    Ok(companion.url(&path))
+    #[cfg(not(target_os = "android"))]
+    let link = {
+        let _ = &app;
+        None::<String>
+    };
+    let Some(link) = link else {
+        return Ok(None);
+    };
+    let companion = state.companion()?;
+    state.launch.store(false, Ordering::Relaxed);
+    match companion.offer_link(&link) {
+        Ok(offer) => Ok(Some(OfferView {
+            laptop: offer.laptop,
+            notice: None,
+        })),
+        Err(OfferError::Pending) => Ok(companion.pending_offer().map(|offer| OfferView {
+            laptop: offer.laptop,
+            notice: Some(PAIRING_PENDING),
+        })),
+        Err(error) => Err(Failure::rejected(error)),
+    }
 }
 
-fn valid_fleet(fleet: &str) -> bool {
-    fleet.len() == 13
-        && fleet.starts_with('f')
-        && fleet[1..]
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+#[tauri::command]
+fn offer_link(state: tauri::State<'_, AppState>, text: String) -> Result<OfferView, Failure> {
+    let offer = state
+        .companion()?
+        .offer_link(&text)
+        .map_err(Failure::rejected)?;
+    Ok(OfferView {
+        laptop: offer.laptop,
+        notice: None,
+    })
+}
+
+#[tauri::command]
+async fn open_board(state: tauri::State<'_, AppState>) -> Result<Option<String>, Failure> {
+    if !state.launch.swap(false, Ordering::Relaxed) {
+        return Ok(None);
+    }
+    state
+        .companion()?
+        .open_board()
+        .await
+        .map_err(|error| failure(error, &state.lost))
+}
+
+#[tauri::command]
+fn cancel_pairing(state: tauri::State<'_, AppState>) -> Result<(), Failure> {
+    state.companion()?.cancel_pairing();
+    Ok(())
+}
+
+#[tauri::command]
+async fn forget_laptop(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), Failure> {
+    let window = app.get_webview_window("main").ok_or_else(|| Failure {
+        message: "Can't reach your laptop.".to_owned(),
+        retry: false,
+    })?;
+    window.clear_all_browsing_data().map_err(|error| Failure {
+        message: error.to_string(),
+        retry: false,
+    })?;
+    state
+        .companion()?
+        .forget_laptop()
+        .await
+        .map_err(|error| Failure {
+            message: error.to_string(),
+            retry: false,
+        })
+}
+
+#[tauri::command]
+async fn confirm_pairing(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), Failure> {
+    let window = app.get_webview_window("main").ok_or_else(|| Failure {
+        message: "Can't reach your laptop.".to_owned(),
+        retry: false,
+    })?;
+    let clear = || {
+        window
+            .clear_all_browsing_data()
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    };
+    let url = state
+        .companion()?
+        .confirm(clear)
+        .await
+        .map_err(|error| failure(error, &state.lost))?;
+    state.lost.store(0, Ordering::Relaxed);
+    let url = tauri::Url::parse(&url).map_err(|_| Failure {
+        message: "Can't reach your laptop.".to_owned(),
+        retry: false,
+    })?;
+    window.navigate(url).map_err(|error| Failure {
+        message: error.to_string(),
+        retry: false,
+    })
+}
+
+fn secure_for(url: &tauri::Url, port: u16) -> bool {
+    if url.scheme() == "tauri" || url.host_str() == Some("tauri.localhost") {
+        return true;
+    }
+    url.host_str() == Some("localhost")
+        && url.port() == Some(port)
+        && url.path().trim_end_matches('/').ends_with("/pair")
+}
+
+fn apply_secure(app: &tauri::AppHandle, secure: bool) {
+    #[cfg(target_os = "android")]
+    if let Some(bridge) = app.try_state::<mobile::Bridge>() {
+        let bridge = bridge.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            bridge.set_secure(secure).await;
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, secure);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().plugin(mobile::init());
     #[cfg(target_os = "android")]
     let builder = builder.plugin(keystore::plugin());
     builder
-        .setup(|app| {
-            #[cfg(target_os = "android")]
+        .on_page_load(|webview, payload| {
+            if let Some(state) = webview.app_handle().try_state::<AppState>()
+                && let Ok(companion) = &state.companion
             {
-                let data_dir = app.path().app_data_dir()?;
+                let secure = secure_for(payload.url(), companion.port());
+                apply_secure(webview.app_handle(), secure);
+            }
+        })
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            #[cfg(target_os = "android")]
+            let companion = {
                 let cipher = Arc::new(app.state::<keystore::KeystoreCipher>().inner().clone());
-                let companion = tauri::async_runtime::block_on(Companion::start(CompanionConfig {
+                tauri::async_runtime::block_on(Companion::start(CompanionConfig {
                     data_dir,
                     cipher,
                 }))
                 .map(Arc::new)
-                .map_err(|error| format!("the phone's key could not start the companion: {error}"));
-                app.manage(AppState { companion });
-            }
+                .map_err(|error| format!("the phone's key could not start the companion: {error}"))
+            };
             #[cfg(not(target_os = "android"))]
-            let _ = app;
+            let companion = {
+                let _ = data_dir;
+                Err::<Arc<Companion>, String>(
+                    "the Android Keystore is only available on a phone".to_owned(),
+                )
+            };
+            let signals = companion
+                .as_ref()
+                .ok()
+                .and_then(|companion| companion.take_signals());
+            app.manage(AppState {
+                companion,
+                lost: AtomicU32::new(0),
+                launch: AtomicBool::new(true),
+            });
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(mut signals) = signals else {
+                    return;
+                };
+                #[cfg(not(target_os = "android"))]
+                let _ = &handle;
+                while signals.recv().await.is_some() {
+                    #[cfg(target_os = "android")]
+                    if let Some(bridge) = handle.try_state::<mobile::Bridge>() {
+                        bridge.show_recover_actions().await;
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            proxy_url,
-            phone_endpoint_id,
-            open_board
+            intake_intent,
+            offer_link,
+            open_board,
+            cancel_pairing,
+            confirm_pairing,
+            forget_laptop
         ])
         .build(tauri::generate_context!())
         .expect("the Tauri app builds")
@@ -101,4 +288,22 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flag_secure_covers_the_pairing_screen_and_the_pair_page() {
+        let local = tauri::Url::parse("http://tauri.localhost/").unwrap();
+        let pair =
+            tauri::Url::parse("http://localhost:50123/f0123456789ab/pair#K7QM3XRD2P").unwrap();
+        let fleet = tauri::Url::parse("http://localhost:50123/f0123456789ab/").unwrap();
+        let other = tauri::Url::parse("https://example.test/pair").unwrap();
+        assert!(secure_for(&local, 50123));
+        assert!(secure_for(&pair, 50123));
+        assert!(!secure_for(&fleet, 50123));
+        assert!(!secure_for(&other, 50123));
+    }
 }

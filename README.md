@@ -98,7 +98,7 @@ If the Board answers with its login page, a pairing page, or a refusal such as "
 - `url` 2.5.8: parses and compares the navigation URLs; the standard library has no URL parser, and it is the type Tauri hands the navigation callback.
 - `socket2` 0.6.5, tests only: sets `SO_LINGER` so the fixture Board can send the reset that becomes code 5.
 - `tauri` 2.12.5 and `tauri-build` 2.7.4: the Android shell and its build script, pinned with `tauri-cli` 2.12.4.
-- `tauri-plugin-opener` 2.7.2: sends a refused navigation to the Android system browser; neither the standard library nor Tauri starts that intent itself.
+- `tauri-plugin-opener` 2.7.2: sends a refused navigation, a clicked `_blank` link and a `window.open` call to the Android system browser; neither the standard library nor Tauri starts that intent itself. Its `open_url` command is granted to the bundled page and to `http://localhost:*` by `src-tauri/capabilities/external-links.json`, and its link script is left on.
 
 `Cargo.lock` holds every transitive version.
 

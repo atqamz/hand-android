@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use iroh::EndpointAddr;
 use iroh::endpoint::{Endpoint, QuicTransportConfig, VarInt, presets};
+use url::Url;
 
 use crate::dialer::{ALPN, Dialer, STREAMS_PER_CONNECTION};
 use crate::key;
@@ -11,6 +12,19 @@ use crate::proxy::{self, Proxy};
 
 pub struct CompanionConfig {
     pub data_dir: PathBuf,
+}
+
+pub(crate) fn proxy_url(port: u16, path: &str) -> String {
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    format!("http://localhost:{port}{path}")
+}
+
+pub fn proxy_origin(port: u16) -> Url {
+    Url::parse(&proxy_url(port, "/")).expect("the proxy URL parses")
 }
 
 #[derive(Clone)]
@@ -54,12 +68,7 @@ impl Companion {
     }
 
     pub fn url(&self, path: &str) -> String {
-        let path = if path.starts_with('/') {
-            path.to_owned()
-        } else {
-            format!("/{path}")
-        };
-        format!("http://localhost:{}{path}", self.port)
+        proxy_url(self.port, path)
     }
 
     pub async fn set_target(&self, target: Option<EndpointAddr>) {

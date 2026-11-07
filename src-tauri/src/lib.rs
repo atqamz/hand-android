@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use hand_android_core::{Companion, CompanionConfig, may_load, parse_target};
+use hand_android_core::{Companion, CompanionConfig, may_load, parse_target, proxy_origin};
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
@@ -49,17 +49,39 @@ fn valid_fleet(fleet: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-const BUNDLED_ORIGIN: &str = "http://tauri.localhost";
+fn bundled_origin(config: &tauri::Config) -> tauri::Url {
+    #[cfg(dev)]
+    let configured = config.build.dev_url.clone();
+    #[cfg(not(dev))]
+    let configured = match config.build.frontend_dist.as_ref() {
+        Some(tauri::utils::config::FrontendDist::Url(url)) => Some(url.clone()),
+        _ => None,
+    };
+    configured.unwrap_or_else(|| {
+        let scheme = if config
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == "main")
+            .is_some_and(|window| window.use_https_scheme)
+        {
+            "https"
+        } else {
+            "http"
+        };
+        tauri::Url::parse(&format!("{scheme}://tauri.localhost"))
+            .expect("the bundled origin parses")
+    })
+}
 
-fn origin_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    let bundled = tauri::Url::parse(BUNDLED_ORIGIN).expect("the bundled origin parses");
+fn origin_guard(bundled: tauri::Url) -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("board-origin")
+        .js_init_script(include_str!("external_links.js"))
         .on_navigation(move |webview, url| {
-            let port = webview
+            let proxy = webview
                 .try_state::<AppState>()
-                .map(|state| state.companion.port())
-                .unwrap_or_default();
-            if may_load(url, &bundled, port) {
+                .map(|state| proxy_origin(state.companion.port()));
+            if may_load(url, &bundled, proxy.as_ref()) {
                 return true;
             }
             let _ = webview.opener().open_url(url.as_str(), None::<&str>);
@@ -70,13 +92,11 @@ fn origin_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    let bundled = bundled_origin(context.config());
     tauri::Builder::default()
-        .plugin(
-            tauri_plugin_opener::Builder::new()
-                .open_js_links_on_click(false)
-                .build(),
-        )
-        .plugin(origin_guard())
+        .plugin(tauri_plugin_opener::Builder::new().build())
+        .plugin(origin_guard(bundled))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let companion =
@@ -91,7 +111,7 @@ pub fn run() {
             phone_endpoint_id,
             open_board
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("the Tauri app builds")
         .run(|app, event| {
             if let tauri::RunEvent::Resumed = event {
@@ -102,4 +122,35 @@ pub fn run() {
                 });
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bundled_origin_follows_the_app_config() {
+        let config = tauri::Config::default();
+        assert_eq!(bundled_origin(&config).as_str(), "http://tauri.localhost/");
+
+        let mut https = tauri::Config::default();
+        https.app.windows = vec![tauri::utils::config::WindowConfig {
+            use_https_scheme: true,
+            ..Default::default()
+        }];
+        assert_eq!(bundled_origin(&https).as_str(), "https://tauri.localhost/");
+    }
+
+    #[cfg(not(dev))]
+    #[test]
+    fn the_bundled_origin_follows_a_frontend_dist_url() {
+        let mut config = tauri::Config::default();
+        config.build.frontend_dist = Some(tauri::utils::config::FrontendDist::Url(
+            tauri::Url::parse("https://app.example.test/").unwrap(),
+        ));
+        assert_eq!(
+            bundled_origin(&config).as_str(),
+            "https://app.example.test/"
+        );
+    }
 }

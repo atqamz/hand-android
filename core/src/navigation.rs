@@ -1,43 +1,70 @@
 use url::Url;
 
-pub fn may_load(url: &Url, bundled_origin: &Url, proxy_port: u16) -> bool {
+pub fn may_load(url: &Url, bundled_origin: &Url, proxy_origin: Option<&Url>) -> bool {
     url.origin() == bundled_origin.origin()
-        || (url.scheme() == "http"
-            && url.host_str() == Some("localhost")
-            && url.port_or_known_default() == Some(proxy_port))
+        || proxy_origin.is_some_and(|proxy| url.origin() == proxy.origin())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::companion::{proxy_origin, proxy_url};
 
     #[test]
     fn only_the_bundled_page_and_the_proxy_load() {
         let bundled = Url::parse("http://tauri.localhost/").unwrap();
-        let port = 49152;
+        let proxy = Url::parse("http://localhost:49152/").unwrap();
         let cases = [
-            ("http://tauri.localhost/".to_owned(), true),
-            ("http://tauri.localhost/index.html".to_owned(), true),
-            (format!("http://localhost:{port}/"), true),
+            ("http://tauri.localhost/", true),
+            ("http://tauri.localhost/index.html", true),
+            ("http://localhost:49152/", true),
+            ("http://localhost:49152/f0123456789ab/pair#v1.abc", true),
+            ("http://localhost:49152/static/app.js", true),
+            ("http://LOCALHOST:49152/", true),
+            ("http://localhost:49152", true),
+            ("http://127.0.0.1:49152/", false),
+            ("http://localhost:49153/", false),
+            ("https://localhost:49152/", false),
+            ("http://localhost.:49152/", false),
+            ("http://evil.localhost:49152/", false),
+            ("http://evil.test/", false),
+            ("http://localhost:49152@evil.test/", false),
             (
-                format!("http://localhost:{port}/f0123456789ab/pair#v1.abc"),
-                true,
-            ),
-            (format!("http://localhost:{port}/static/app.js"), true),
-            (format!("http://127.0.0.1:{port}/"), false),
-            (format!("http://localhost:{}/", port + 1), false),
-            (format!("https://localhost:{port}/"), false),
-            ("http://evil.test/".to_owned(), false),
-            (format!("http://localhost:{port}@evil.test/"), false),
-            (
-                "file:///data/user/0/io.github.atqamz.handcompanion/files/page.html".to_owned(),
+                "file:///data/user/0/io.github.atqamz.handcompanion/files/page.html",
                 false,
             ),
-            ("handboard://c#v1.abc".to_owned(), false),
+            ("handboard://c#v1.abc", false),
         ];
         for (url, allowed) in cases {
-            let url = Url::parse(&url).unwrap();
-            assert_eq!(may_load(&url, &bundled, port), allowed, "{url}");
+            let url = Url::parse(url).unwrap();
+            assert_eq!(may_load(&url, &bundled, Some(&proxy)), allowed, "{url}");
         }
+    }
+
+    #[test]
+    fn an_unknown_proxy_origin_allows_only_the_bundled_page() {
+        let bundled = Url::parse("http://tauri.localhost/").unwrap();
+        for url in ["http://tauri.localhost/", "http://tauri.localhost/main.js"] {
+            assert!(may_load(&Url::parse(url).unwrap(), &bundled, None), "{url}");
+        }
+        for url in [
+            "http://localhost:0/",
+            "http://localhost:49152/",
+            "https://tauri.localhost/",
+        ] {
+            assert!(
+                !may_load(&Url::parse(url).unwrap(), &bundled, None),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_proxy_origin_is_the_url_the_app_loads() {
+        let port = 49152;
+        let bundled = Url::parse("http://tauri.localhost/").unwrap();
+        let loaded = Url::parse(&proxy_url(port, "/static/app.js")).unwrap();
+        assert_eq!(loaded.origin(), proxy_origin(port).origin());
+        assert!(may_load(&loaded, &bundled, Some(&proxy_origin(port))));
     }
 }

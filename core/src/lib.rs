@@ -3,16 +3,22 @@ mod codes;
 mod companion;
 mod dialer;
 mod key;
+mod link;
+mod pairing;
 #[cfg(test)]
 mod testutil;
 
 pub mod proxy;
 
 pub use codes::{BOARD_ERROR, BOARD_UNREACHABLE, FULL, IDLE, STREAM_IDLE};
-pub use companion::{Companion, CompanionConfig, StartError};
+pub use companion::{Companion, CompanionConfig, ConfirmError, StartError};
 pub use dialer::{
     ALPN, BACKOFF_RESET, Dialer, HANDSHAKE_DEADLINE, Notice, OpenError, STREAMS_PER_CONNECTION,
     StreamRecv, StreamSend, parse_target,
 };
 pub use key::{key_path, load_or_create as load_or_create_key};
-pub use proxy::Proxy;
+pub use link::{
+    CAMERA_REFUSED, LINK_NEEDS_UPDATE, LINK_REJECTED, Link, MAX_LEN, Reject, parse_link,
+};
+pub use pairing::{Offer, Pairing};
+pub use proxy::{Proxy, Signal};

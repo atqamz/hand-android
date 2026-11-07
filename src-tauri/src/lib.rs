@@ -198,12 +198,18 @@ fn apply_secure(app: &tauri::AppHandle, secure: bool) {
 }
 
 fn bundled_origin(config: &tauri::Config) -> tauri::Url {
-    #[cfg(dev)]
-    let configured = config.build.dev_url.clone();
-    #[cfg(not(dev))]
-    let configured = match config.build.frontend_dist.as_ref() {
-        Some(tauri::utils::config::FrontendDist::Url(url)) => Some(url.clone()),
-        _ => None,
+    bundled_origin_for(config, cfg!(dev))
+}
+
+fn bundled_origin_for(config: &tauri::Config, dev: bool) -> tauri::Url {
+    let configured = if dev {
+        config.build.dev_url.clone()
+    } else if let Some(tauri::utils::config::FrontendDist::Url(url)) =
+        config.build.frontend_dist.as_ref()
+    {
+        Some(url.clone())
+    } else {
+        None
     };
     configured.unwrap_or_else(|| {
         let scheme = if config
@@ -306,25 +312,39 @@ mod tests {
     #[test]
     fn the_bundled_origin_follows_the_app_config() {
         let config = tauri::Config::default();
-        assert_eq!(bundled_origin(&config).as_str(), "http://tauri.localhost/");
+        assert_eq!(
+            bundled_origin_for(&config, true).as_str(),
+            "http://tauri.localhost/"
+        );
+        assert_eq!(
+            bundled_origin_for(&config, false).as_str(),
+            "http://tauri.localhost/"
+        );
 
         let mut https = tauri::Config::default();
         https.app.windows = vec![tauri::utils::config::WindowConfig {
             use_https_scheme: true,
             ..Default::default()
         }];
-        assert_eq!(bundled_origin(&https).as_str(), "https://tauri.localhost/");
+        assert_eq!(
+            bundled_origin_for(&https, false).as_str(),
+            "https://tauri.localhost/"
+        );
     }
 
-    #[cfg(not(dev))]
     #[test]
-    fn the_bundled_origin_follows_a_frontend_dist_url() {
+    fn the_bundled_origin_follows_a_dev_or_dist_url() {
         let mut config = tauri::Config::default();
+        config.build.dev_url = Some(tauri::Url::parse("http://localhost:1420/").unwrap());
         config.build.frontend_dist = Some(tauri::utils::config::FrontendDist::Url(
             tauri::Url::parse("https://app.example.test/").unwrap(),
         ));
         assert_eq!(
-            bundled_origin(&config).as_str(),
+            bundled_origin_for(&config, true).as_str(),
+            "http://localhost:1420/"
+        );
+        assert_eq!(
+            bundled_origin_for(&config, false).as_str(),
             "https://app.example.test/"
         );
     }

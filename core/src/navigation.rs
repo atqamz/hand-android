@@ -60,6 +60,34 @@ mod tests {
     }
 
     #[test]
+    fn a_clicked_link_stays_on_the_board_or_leaves_it() {
+        let bundled = Url::parse("http://tauri.localhost/").unwrap();
+        let proxy = Url::parse("http://localhost:49152/").unwrap();
+        for url in [
+            "http://localhost:49152/f0123456789ab/task/3",
+            "http://localhost:49152/f0123456789ab/task/3#notes",
+            "http://LOCALHOST:49152/f0123456789ab/task/3",
+        ] {
+            assert!(
+                may_load(&Url::parse(url).unwrap(), &bundled, Some(&proxy)),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://github.com/atqamz/hand",
+            "http://localhost:49153/f0123456789ab/task/3",
+            "http://evil.test/f0123456789ab/task/3",
+            "mailto:board@example.test",
+            "tel:+15550100",
+        ] {
+            assert!(
+                !may_load(&Url::parse(url).unwrap(), &bundled, Some(&proxy)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn the_proxy_origin_is_the_url_the_app_loads() {
         let port = 49152;
         let bundled = Url::parse("http://tauri.localhost/").unwrap();

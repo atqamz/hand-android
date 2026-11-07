@@ -59,16 +59,19 @@ HAND_IROH_BIN="$PWD/hand/iroh/target/debug/hand-iroh" cargo test --locked --work
 
 Without `HAND_IROH_BIN` the 13 sidecar tests print a skip and return; CI always sets it. The suite proves a proxied HTTP request and response, half-close in both directions, stream codes 3, 4 and 5, connection codes 1 and 2, the 13th stream waiting, a stream opening only on its first byte, a Board that answers before it closes while the phone still sends, and a wrong secret ending a stream with no byte. It also covers the backoff after a full laptop, the key's file and folder permissions, the port kept across a restart, the relay hint, the pairing link parser over the contract's 13 valid and 73 invalid vectors, the confirmation text, the open URL, the pending link kept against a second one, the iroh key checked before the other fields, the clear-before-forget order of a second laptop, and the Board opened from the saved laptop on a relaunch.
 
-Measured on 2026-11-07 on the same host, debug builds through loopback: 44 tests, 13 of them against the sidecar; slowest time to first byte of three proxied requests 70-76 ms; the first stream after a full laptop connected 1.10-1.21 s after the request, which is the 1-second backoff.
+Measured on 2026-11-07 on the same host, debug builds through loopback: 50 tests, 13 of them against the sidecar; slowest time to first byte of three proxied requests 70-76 ms; the first stream after a full laptop connected 1.10-1.21 s after the request, which is the 1-second backoff.
 
 The standard checks are:
 
 ```sh
 cargo fmt --all --check
 cargo test --locked --workspace
+node --test src-tauri/tests/external_links.test.mjs
 cargo clippy --locked --workspace --all-targets --target aarch64-linux-android -- -D warnings
 actionlint .github/workflows/ci.yaml
 ```
+
+The link wrapper test needs Node.js 20 or newer, and no package.
 
 `cargo clippy` for the Android target needs the NDK's C compiler, as ring compiles C:
 
@@ -106,7 +109,7 @@ If the Board answers with its login page, a pairing page, or a refusal such as "
 - `serde_json` 1.0.154: `tauri::generate_context!` expands to code that names it in the shell; the core's tests also read the contract's vectors with it.
 - `socket2` 0.6.5, tests only: sets `SO_LINGER` so the fixture Board can send the reset that becomes code 5.
 - `tauri` 2.12.5 and `tauri-build` 2.7.4: the Android shell and its build script, pinned with `tauri-cli` 2.12.4.
-- `tauri-plugin-opener` 2.7.2: sends a refused navigation, a clicked `_blank` link and a `window.open` call to the Android system browser; neither the standard library nor Tauri starts that intent itself. Its `open_url` command is granted to the bundled page and to `http://localhost:*` by `src-tauri/capabilities/external-links.json`, and its link script is left on.
+- `tauri-plugin-opener` 2.7.2: sends a refused navigation and a clicked `_blank` link or `window.open` call to another origin, or with a `mailto:` or `tel:` scheme, to the Android system browser; neither the standard library nor Tauri starts that intent itself. Its `open_url` command is granted to the bundled page and to `http://localhost:*` by `src-tauri/capabilities/external-links.json`, and its link script is left on.
 
 `Cargo.lock` holds every transitive version.
 

@@ -9,9 +9,15 @@ const KEY_DIR: &str = "iroh";
 const KEY_FILE: &str = "companion.key";
 const KEY_LEN: usize = 32;
 
+const CODE_KEY_REPLACED: &str = "keyReplaced";
+const CODE_CORRUPT: &str = "corrupt";
+#[cfg(test)]
+const CODE_KEYSTORE: &str = "keystore";
+
 pub trait KeyCipher: Send + Sync {
     fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError>;
     fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, CipherError>;
+    fn probe(&self) -> Result<(), CipherError>;
 }
 
 #[derive(Debug)]
@@ -27,6 +33,20 @@ impl fmt::Display for CipherError {
             Self::KeyReplaced => write!(f, "the key that sealed the stored key is gone"),
             Self::Corrupt(message) => write!(f, "{message}"),
             Self::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl CipherError {
+    pub fn from_plugin(code: Option<&str>, message: Option<&str>) -> Self {
+        match code {
+            Some(CODE_KEY_REPLACED) => Self::KeyReplaced,
+            Some(CODE_CORRUPT) => {
+                Self::Corrupt(message.unwrap_or("the stored key is corrupt").to_owned())
+            }
+            _ => Self::Io(io::Error::other(
+                message.unwrap_or("the Android Keystore failed").to_owned(),
+            )),
         }
     }
 }
@@ -66,6 +86,11 @@ fn stored(path: &Path, cipher: &dyn KeyCipher) -> io::Result<Stored> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Stored::Missing),
         Err(error) => return Err(error),
     };
+    match cipher.probe() {
+        Ok(()) => {}
+        Err(CipherError::KeyReplaced) => return Ok(Stored::Replaced),
+        Err(error) => return Err(cipher_io(error)),
+    }
     let plaintext = match cipher.open(&sealed) {
         Ok(plaintext) => plaintext,
         Err(CipherError::KeyReplaced) => return Ok(Stored::Replaced),
@@ -106,11 +131,15 @@ fn replace(dir: &Path, path: &Path, cipher: &dyn KeyCipher) -> io::Result<Secret
 
 fn sealed_key(cipher: &dyn KeyCipher) -> io::Result<(SecretKey, Vec<u8>)> {
     let key = SecretKey::generate();
-    let sealed = cipher.seal(&key.to_bytes()).map_err(|error| match error {
+    let sealed = cipher.seal(&key.to_bytes()).map_err(cipher_io)?;
+    Ok((key, sealed))
+}
+
+fn cipher_io(error: CipherError) -> io::Error {
+    match error {
         CipherError::Io(error) => error,
         other => io::Error::other(other.to_string()),
-    })?;
-    Ok((key, sealed))
+    }
 }
 
 fn write_temp(dir: &Path, key: &SecretKey, sealed: &[u8]) -> io::Result<PathBuf> {
@@ -191,6 +220,7 @@ mod tests {
         key: Arc<Mutex<Option<u8>>>,
         fail_seal: Arc<AtomicBool>,
         open_error: Arc<Mutex<Option<io::ErrorKind>>>,
+        probe_error: Arc<Mutex<Option<io::ErrorKind>>>,
     }
 
     impl FakeCipher {
@@ -199,6 +229,7 @@ mod tests {
                 key: Arc::new(Mutex::new(None)),
                 fail_seal: Arc::new(AtomicBool::new(false)),
                 open_error: Arc::new(Mutex::new(None)),
+                probe_error: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -216,6 +247,10 @@ mod tests {
 
         fn fail_next_open(&self, kind: io::ErrorKind) {
             *self.open_error.lock().unwrap() = Some(kind);
+        }
+
+        fn fail_next_probe(&self, kind: io::ErrorKind) {
+            *self.probe_error.lock().unwrap() = Some(kind);
         }
     }
 
@@ -248,6 +283,17 @@ mod tests {
     }
 
     impl KeyCipher for FakeCipher {
+        fn probe(&self) -> Result<(), CipherError> {
+            if let Some(kind) = self.probe_error.lock().unwrap().take() {
+                return Err(CipherError::Io(io::Error::from(kind)));
+            }
+            if self.key.lock().unwrap().is_some() {
+                Ok(())
+            } else {
+                Err(CipherError::KeyReplaced)
+            }
+        }
+
         fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
             let mut key = self.key.lock().unwrap();
             let id = *key.get_or_insert_with(|| NEXT_KEY.fetch_add(1, Ordering::SeqCst));
@@ -322,9 +368,10 @@ mod tests {
     #[test]
     fn refuses_corrupt_ciphertext_and_leaves_it_alone() {
         let dir = temp();
-        fs::create_dir_all(dir.path().join(KEY_DIR)).unwrap();
+        let cipher = FakeCipher::new();
+        load_or_create(dir.path(), &cipher).unwrap();
         fs::write(key_path(dir.path()), b"short").unwrap();
-        let error = load_or_create(dir.path(), &FakeCipher::new()).unwrap_err();
+        let error = load_or_create(dir.path(), &cipher).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("not a readable key"));
         assert_eq!(fs::read(key_path(dir.path())).unwrap(), b"short");
@@ -365,6 +412,54 @@ mod tests {
         let error = load_or_create(dir.path(), &cipher).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(fs::read(key_path(dir.path())).unwrap(), sealed);
+    }
+
+    #[test]
+    fn a_keystore_probe_error_is_not_a_missing_key() {
+        let dir = temp();
+        let cipher = FakeCipher::new();
+        let first = load_or_create(dir.path(), &cipher).unwrap();
+        let sealed = fs::read(key_path(dir.path())).unwrap();
+        cipher.fail_next_probe(io::ErrorKind::PermissionDenied);
+        let error = load_or_create(dir.path(), &cipher).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(key_path(dir.path())).unwrap(), sealed);
+        assert_eq!(
+            load_or_create(dir.path(), &cipher).unwrap().to_bytes(),
+            first.to_bytes()
+        );
+    }
+
+    #[test]
+    fn the_plugin_codes_match_the_android_plugin() {
+        assert!(matches!(
+            CipherError::from_plugin(Some(CODE_KEY_REPLACED), None),
+            CipherError::KeyReplaced
+        ));
+        assert!(matches!(
+            CipherError::from_plugin(Some(CODE_CORRUPT), Some("failed authentication")),
+            CipherError::Corrupt(message) if message == "failed authentication"
+        ));
+        for (code, message) in [(Some(CODE_KEYSTORE), Some("boom")), (None, None)] {
+            match CipherError::from_plugin(code, message) {
+                CipherError::Io(error) => assert!(!error.to_string().is_empty()),
+                other => panic!("{code:?} mapped to {other:?}"),
+            }
+        }
+        const KOTLIN: &str = include_str!(
+            "../../src-tauri/gen/android/app/src/main/java/io/github/atqamz/handcompanion/KeystorePlugin.kt"
+        );
+        for (name, code) in [
+            ("CODE_KEY_REPLACED", CODE_KEY_REPLACED),
+            ("CODE_CORRUPT", CODE_CORRUPT),
+            ("CODE_KEYSTORE", CODE_KEYSTORE),
+        ] {
+            let declaration = format!("const val {name} = \"{code}\"");
+            assert!(
+                KOTLIN.contains(&declaration),
+                "KeystorePlugin.kt does not declare `{declaration}`"
+            );
+        }
     }
 
     #[test]

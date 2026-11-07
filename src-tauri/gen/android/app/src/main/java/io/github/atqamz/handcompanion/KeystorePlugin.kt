@@ -11,6 +11,7 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.security.KeyStore
+import java.security.UnrecoverableKeyException
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -25,6 +26,20 @@ class KeyBytes {
 
 @TauriPlugin
 class KeystorePlugin(activity: Activity) : Plugin(activity) {
+  @Command
+  @Synchronized
+  fun probe(invoke: Invoke) {
+    try {
+      if (key(create = false) == null) {
+        invoke.reject("the Android Keystore key that sealed the identity is gone", CODE_KEY_REPLACED)
+      } else {
+        invoke.resolve(response(ByteArray(0)))
+      }
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "the Android Keystore could not read the key", CODE_KEYSTORE)
+    }
+  }
+
   @Command
   @Synchronized
   fun seal(invoke: Invoke) {
@@ -95,17 +110,23 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
   private fun key(create: Boolean): SecretKey? {
     val store = KeyStore.getInstance(KEYSTORE)
     store.load(null)
-    if (!store.containsAlias(ALIAS)) {
-      return if (create) generate(store) else null
+    val existing = try {
+      store.getKey(ALIAS, null) as? SecretKey
+    } catch (error: KeyPermanentlyInvalidatedException) {
+      null
+    } catch (error: UnrecoverableKeyException) {
+      if (error.cause != null) throw error
+      null
     }
-    val existing = store.getKey(ALIAS, null) as? SecretKey
     if (existing != null) {
       return existing
     }
     if (!create) {
       return null
     }
-    store.deleteEntry(ALIAS)
+    if (store.containsAlias(ALIAS)) {
+      store.deleteEntry(ALIAS)
+    }
     return generate(store)
   }
 

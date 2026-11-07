@@ -39,20 +39,17 @@ impl KeyCipher for KeystoreCipher {
     fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, CipherError> {
         self.call("open", sealed)
     }
+
+    fn probe(&self) -> Result<(), CipherError> {
+        self.call("probe", &[]).map(|_| ())
+    }
 }
 
 fn plugin_error(error: PluginInvokeError) -> CipherError {
     match &error {
-        PluginInvokeError::InvokeRejected(response) => match response.code.as_deref() {
-            Some("keyReplaced") => CipherError::KeyReplaced,
-            Some("corrupt") => CipherError::Corrupt(
-                response
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| "the stored key is corrupt".to_owned()),
-            ),
-            _ => CipherError::Io(io::Error::other(error.to_string())),
-        },
+        PluginInvokeError::InvokeRejected(response) => {
+            CipherError::from_plugin(response.code.as_deref(), response.message.as_deref())
+        }
         _ => CipherError::Io(io::Error::other(error.to_string())),
     }
 }

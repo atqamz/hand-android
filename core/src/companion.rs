@@ -238,6 +238,10 @@ mod tests {
     struct TestCipher;
 
     impl KeyCipher for TestCipher {
+        fn probe(&self) -> Result<(), CipherError> {
+            Ok(())
+        }
+
         fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
             Ok(plaintext.to_vec())
         }

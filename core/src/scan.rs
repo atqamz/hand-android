@@ -1,14 +1,10 @@
-use crate::link::{CAMERA_REFUSED, Reject, parse_link};
+use crate::link::CAMERA_REFUSED;
 
 pub const CAMERA_FAILED: &str = "The camera could not start. Try again, or paste the link.";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScanState {
-    Starting,
-    Permission,
-    Preview,
-    Failed,
-}
+pub const SCAN_OPEN: &str = "scan_open";
+pub const SCAN_BUSY: &str = "A scan is already open. Close it and try again.";
+pub const SCAN_UNKNOWN: &str =
+    "The scanner returned an unknown status. Try again, or paste the link.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanStatus {
@@ -34,7 +30,8 @@ impl ScanStatus {
 pub enum ScanError {
     Permission,
     Failed,
-    Rejected(Reject),
+    Busy,
+    Unknown,
 }
 
 impl ScanError {
@@ -42,63 +39,32 @@ impl ScanError {
         match self {
             Self::Permission => CAMERA_REFUSED,
             Self::Failed => CAMERA_FAILED,
-            Self::Rejected(reject) => reject.message(),
+            Self::Busy => SCAN_BUSY,
+            Self::Unknown => SCAN_UNKNOWN,
         }
     }
 
     pub fn retry(self) -> bool {
-        matches!(self, Self::Permission | Self::Failed)
+        matches!(
+            self,
+            Self::Permission | Self::Failed | Self::Busy | Self::Unknown
+        )
     }
 }
 
-pub struct Scan {
-    state: ScanState,
-}
-
-impl Scan {
-    pub fn new() -> Self {
-        Self {
-            state: ScanState::Starting,
-        }
-    }
-
-    pub fn state(&self) -> ScanState {
-        self.state
-    }
-
-    pub fn apply(
-        &mut self,
-        status: Option<ScanStatus>,
-        text: Option<String>,
-    ) -> Result<Option<String>, ScanError> {
-        match status {
-            Some(ScanStatus::Code) => {
-                self.state = ScanState::Preview;
-                let text = text.ok_or(ScanError::Failed)?;
-                let text = text.trim();
-                parse_link(text).map_err(ScanError::Rejected)?;
-                Ok(Some(text.to_owned()))
-            }
-            Some(ScanStatus::Permission) => {
-                self.state = ScanState::Permission;
-                Err(ScanError::Permission)
-            }
-            Some(ScanStatus::Cancelled) => Ok(None),
-            Some(ScanStatus::Failed) | None => {
-                self.state = ScanState::Failed;
-                Err(ScanError::Failed)
-            }
-        }
-    }
-
-    pub fn retry(&mut self) {
-        self.state = ScanState::Starting;
-    }
-}
-
-impl Default for Scan {
-    fn default() -> Self {
-        Self::new()
+pub fn scan_reply(
+    status: Option<ScanStatus>,
+    text: Option<String>,
+) -> Result<Option<String>, ScanError> {
+    match status {
+        Some(ScanStatus::Code) => match text {
+            Some(text) => Ok(Some(text)),
+            None => Err(ScanError::Failed),
+        },
+        Some(ScanStatus::Permission) => Err(ScanError::Permission),
+        Some(ScanStatus::Failed) => Err(ScanError::Failed),
+        Some(ScanStatus::Cancelled) => Ok(None),
+        None => Err(ScanError::Unknown),
     }
 }
 
@@ -113,64 +79,57 @@ mod tests {
         format!("handboard://c#v=1&e={ID}&f=f0123456789ab&c=K7QM3XRD2P")
     }
 
-    fn decoded(text: Option<&str>) -> (Option<ScanStatus>, Option<String>) {
-        match text {
-            Some(text) => (Some(ScanStatus::Code), Some(text.to_owned())),
-            None => (Some(ScanStatus::Cancelled), None),
-        }
-    }
-
     #[test]
-    fn a_scan_starts_and_a_decoded_link_is_returned() {
-        let mut scan = Scan::new();
-        assert_eq!(scan.state(), ScanState::Starting);
-        let (status, text) = decoded(Some(&link()));
-        assert_eq!(scan.apply(status, text).unwrap(), Some(link()));
-        assert_eq!(scan.state(), ScanState::Preview);
-        let (status, text) = decoded(Some(&format!("  {}\n", link())));
-        assert_eq!(scan.apply(status, text).unwrap(), Some(link()));
-    }
-
-    #[test]
-    fn a_foreign_code_is_rejected_with_the_paste_message() {
-        let mut scan = Scan::new();
-        let (status, text) = decoded(Some("https://example.test/"));
-        let error = scan.apply(status, text).unwrap_err();
-        assert_eq!(error, ScanError::Rejected(Reject::Scheme));
-        assert_eq!(error.message(), LINK_REJECTED);
-        assert!(!error.retry());
-        assert_eq!(scan.state(), ScanState::Preview);
+    fn a_decoded_code_goes_to_the_paste_path_unchanged() {
+        let text = format!("  {}\n", link());
+        assert_eq!(
+            scan_reply(Some(ScanStatus::Code), Some(text.clone())).unwrap(),
+            Some(text)
+        );
+        assert_eq!(
+            scan_reply(Some(ScanStatus::Code), None),
+            Err(ScanError::Failed)
+        );
     }
 
     #[test]
     fn a_refused_permission_is_retriable_and_says_the_camera_is_needed() {
-        let mut scan = Scan::new();
-        let error = scan.apply(Some(ScanStatus::Permission), None).unwrap_err();
-        assert_eq!(scan.state(), ScanState::Permission);
+        let error = scan_reply(Some(ScanStatus::Permission), None).unwrap_err();
         assert_eq!(error.message(), CAMERA_REFUSED);
         assert!(error.retry());
-        scan.retry();
-        assert_eq!(scan.state(), ScanState::Starting);
     }
 
     #[test]
     fn a_camera_failure_is_retriable() {
-        let mut scan = Scan::new();
-        let error = scan.apply(Some(ScanStatus::Failed), None).unwrap_err();
-        assert_eq!(scan.state(), ScanState::Failed);
+        let error = scan_reply(Some(ScanStatus::Failed), None).unwrap_err();
         assert_eq!(error.message(), CAMERA_FAILED);
         assert!(error.retry());
-        scan.retry();
-        assert_eq!(scan.state(), ScanState::Starting);
+    }
+
+    #[test]
+    fn a_scan_that_is_already_open_says_so() {
+        let error = ScanError::Busy;
+        assert_eq!(error.message(), SCAN_BUSY);
+        assert_ne!(error.message(), CAMERA_FAILED);
+        assert!(error.retry());
     }
 
     #[test]
     fn cancelling_and_unknown_replies_do_not_leak_a_code() {
-        let mut scan = Scan::new();
-        assert_eq!(scan.apply(Some(ScanStatus::Cancelled), None).unwrap(), None);
-        let error = scan.apply(None, Some(link())).unwrap_err();
-        assert_eq!(error, ScanError::Failed);
+        assert_eq!(scan_reply(Some(ScanStatus::Cancelled), None).unwrap(), None);
+        let error = scan_reply(None, Some(link())).unwrap_err();
+        assert_eq!(error, ScanError::Unknown);
+        assert_eq!(error.message(), SCAN_UNKNOWN);
+        assert_ne!(error.message(), LINK_REJECTED);
         assert!(!error.message().contains("K7QM3XRD2P"));
+    }
+
+    #[test]
+    fn the_plugin_reports_an_open_scan_with_the_code_the_shell_matches() {
+        const KOTLIN: &str = include_str!(
+            "../../src-tauri/gen/android/app/src/main/java/io/github/atqamz/handcompanion/ScannerPlugin.kt"
+        );
+        assert!(KOTLIN.contains(&format!("\"{SCAN_OPEN}\"")));
     }
 
     #[test]

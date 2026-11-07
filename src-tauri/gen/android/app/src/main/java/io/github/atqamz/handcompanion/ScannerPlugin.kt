@@ -15,7 +15,11 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import app.tauri.annotation.Command
@@ -36,6 +40,8 @@ internal class ScanArgs {
   var permissionMessage: String = ""
   var failedMessage: String = ""
 }
+
+private const val SCAN_OPEN = "scan_open"
 
 @TauriPlugin
 class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
@@ -59,13 +65,13 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun scanCode(invoke: Invoke) {
     if (session != null) {
-      invoke.reject("A scan is already open.")
+      invoke.reject("A scan is already open.", SCAN_OPEN)
       return
     }
     val args = invoke.parseArgs(ScanArgs::class.java)
     activity.runOnUiThread {
       if (session != null) {
-        invoke.reject("A scan is already open.")
+        invoke.reject("A scan is already open.", SCAN_OPEN)
         return@runOnUiThread
       }
       val started = Session(invoke, args.permissionMessage, args.failedMessage)
@@ -93,6 +99,12 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
     private var listener: CameraPreview.StateListener? = null
     private var timeout: Runnable? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    private val back = object : OnBackPressedCallback(false) {
+      override fun handleOnBackPressed() {
+        finish("cancelled", null)
+      }
+    }
 
     private val preview = BarcodeView(activity).apply {
       setDecoderFactory(DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE)))
@@ -152,6 +164,14 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
       )
     }
 
+    init {
+      ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+        val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+        panel.setPadding(32, 32, 32, 64 + bars.bottom)
+        insets
+      }
+    }
+
     private val callback = object : BarcodeCallback {
       override fun barcodeResult(result: BarcodeResult) {
         if (state != State.Preview || finished) return
@@ -162,6 +182,9 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
     fun open() {
       val content = activity.findViewById<ViewGroup>(android.R.id.content)
       content.addView(root)
+      (activity as? ComponentActivity)?.onBackPressedDispatcher?.addCallback(back)
+      back.isEnabled = true
+      ViewCompat.requestApplyInsets(root)
       showStarting()
       if (hasPermission()) {
         startPreview()
@@ -201,6 +224,7 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
         return
       }
       showStarting()
+      scheduleTimeout()
       host.requestCameraPermission { granted ->
         if (finished) return@requestCameraPermission
         if (granted) {
@@ -248,6 +272,7 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun showPermission() {
       if (finished) return
+      clearTimeout()
       state = State.Permission
       status.text = permissionMessage
       setActions(listOf(allow, settings, close))
@@ -287,7 +312,7 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
     private fun scheduleTimeout() {
       clearTimeout()
       val task = Runnable {
-        if (!finished && state == State.Starting) showFailed()
+        if (!finished && state == State.Starting) finish("failed", null)
       }
       timeout = task
       handler.postDelayed(task, 15000)
@@ -318,6 +343,8 @@ class ScannerPlugin(private val activity: Activity) : Plugin(activity) {
       if (finished) return
       finished = true
       clearTimeout()
+      back.isEnabled = false
+      back.remove()
       cameraStarted = false
       preview.stopDecoding()
       preview.pause()

@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(target_os = "android")]
 use hand_android_core::CompanionConfig;
 use hand_android_core::{
-    CAMERA_FAILED, Companion, ConfirmError, OfferError, OpenError, PAIRING_PENDING, Scan,
-    ScanStatus, may_load, proxy_origin,
+    CAMERA_FAILED, Companion, ConfirmError, OfferError, OpenError, PAIRING_PENDING, ScanError,
+    ScanStatus, may_load, proxy_origin, scan_reply,
 };
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
@@ -133,21 +133,20 @@ async fn scan_code(app: tauri::AppHandle) -> Result<Option<String>, Failure> {
                 failed_message: CAMERA_FAILED.to_owned(),
             })
             .await
-            .map_err(|()| camera_failure())?;
-        let mut scan = Scan::new();
-        scan.apply(
-            Some(reply.status.as_str()).and_then(ScanStatus::parse),
-            reply.text,
-        )
-        .map_err(|error| Failure {
-            message: error.message().to_owned(),
-            retry: error.retry(),
-        })
+            .map_err(scan_failure)?;
+        scan_reply(ScanStatus::parse(reply.status.as_str()), reply.text).map_err(scan_failure)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
         Err(camera_failure())
+    }
+}
+
+fn scan_failure(error: ScanError) -> Failure {
+    Failure {
+        message: error.message().to_owned(),
+        retry: error.retry(),
     }
 }
 

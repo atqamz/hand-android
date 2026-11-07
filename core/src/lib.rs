@@ -26,4 +26,4 @@ pub use link::{
 pub use navigation::may_load;
 pub use pairing::{Offer, OfferError, PAIRING_PENDING, Pairing};
 pub use proxy::{Proxy, Signal};
-pub use scan::{CAMERA_FAILED, Scan, ScanError, ScanState, ScanStatus};
+pub use scan::{CAMERA_FAILED, SCAN_OPEN, ScanError, ScanStatus, scan_reply};

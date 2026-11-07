@@ -1,6 +1,10 @@
 #[cfg(target_os = "android")]
+use hand_android_core::{SCAN_OPEN, ScanError};
+#[cfg(target_os = "android")]
 use tauri::Manager;
 use tauri::Wry;
+#[cfg(target_os = "android")]
+use tauri::plugin::mobile::{ErrorResponse, PluginInvokeError};
 
 #[cfg(target_os = "android")]
 #[derive(Clone)]
@@ -8,11 +12,18 @@ pub struct ScannerBridge(tauri::plugin::PluginHandle<Wry>);
 
 #[cfg(target_os = "android")]
 impl ScannerBridge {
-    pub async fn scan(&self, args: ScanArgs) -> Result<ScanReply, ()> {
+    pub async fn scan(&self, args: ScanArgs) -> Result<ScanReply, ScanError> {
         self.0
             .run_mobile_plugin_async::<ScanReply>("scanCode", args)
             .await
-            .map_err(|_| ())
+            .map_err(|error| match error {
+                PluginInvokeError::InvokeRejected(ErrorResponse { code, .. })
+                    if code.as_deref() == Some(SCAN_OPEN) =>
+                {
+                    ScanError::Busy
+                }
+                _ => ScanError::Failed,
+            })
     }
 }
 

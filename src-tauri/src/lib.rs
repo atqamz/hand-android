@@ -9,17 +9,23 @@ use hand_android_core::{Companion, parse_target};
 use tauri::Manager;
 
 struct AppState {
-    companion: Arc<Companion>,
+    companion: Result<Arc<Companion>, String>,
+}
+
+impl AppState {
+    fn companion(&self) -> Result<Arc<Companion>, String> {
+        self.companion.clone()
+    }
 }
 
 #[tauri::command]
-fn proxy_url(state: tauri::State<AppState>) -> String {
-    state.companion.url("/")
+fn proxy_url(state: tauri::State<AppState>) -> Result<String, String> {
+    Ok(state.companion()?.url("/"))
 }
 
 #[tauri::command]
-fn phone_endpoint_id(state: tauri::State<AppState>) -> String {
-    state.companion.endpoint_id().to_string()
+fn phone_endpoint_id(state: tauri::State<AppState>) -> Result<String, String> {
+    Ok(state.companion()?.endpoint_id().to_string())
 }
 
 #[tauri::command]
@@ -29,6 +35,7 @@ async fn open_board(
     relay: Option<String>,
     fleet: Option<String>,
 ) -> Result<String, String> {
+    let companion = state.companion()?;
     let target = parse_target(&endpoint_id, relay.as_deref())?;
     let path = match fleet.map(|fleet| fleet.trim().to_owned()) {
         Some(fleet) if !fleet.is_empty() => {
@@ -41,8 +48,8 @@ async fn open_board(
         }
         _ => "/".to_owned(),
     };
-    state.companion.set_target(Some(target)).await;
-    Ok(state.companion.url(&path))
+    companion.set_target(Some(target)).await;
+    Ok(companion.url(&path))
 }
 
 fn valid_fleet(fleet: &str) -> bool {
@@ -64,14 +71,13 @@ pub fn run() {
             {
                 let data_dir = app.path().app_data_dir()?;
                 let cipher = Arc::new(app.state::<keystore::KeystoreCipher>().inner().clone());
-                let companion =
-                    tauri::async_runtime::block_on(Companion::start(CompanionConfig {
-                        data_dir,
-                        cipher,
-                    }))?;
-                app.manage(AppState {
-                    companion: Arc::new(companion),
-                });
+                let companion = tauri::async_runtime::block_on(Companion::start(CompanionConfig {
+                    data_dir,
+                    cipher,
+                }))
+                .map(Arc::new)
+                .map_err(|error| format!("the phone's key could not start the companion: {error}"));
+                app.manage(AppState { companion });
             }
             #[cfg(not(target_os = "android"))]
             let _ = app;
@@ -87,10 +93,12 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Resumed = event {
                 let state = app.state::<AppState>();
-                let companion = state.companion.clone();
-                tauri::async_runtime::spawn(async move {
-                    companion.reconnect_on_resume().await;
-                });
+                if let Ok(companion) = &state.companion {
+                    let companion = companion.clone();
+                    tauri::async_runtime::spawn(async move {
+                        companion.reconnect_on_resume().await;
+                    });
+                }
             }
         });
 }

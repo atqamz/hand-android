@@ -85,7 +85,7 @@ fn create(dir: &Path, path: &Path, cipher: &dyn KeyCipher) -> io::Result<SecretK
     let linked = fs::hard_link(&temp, path);
     let _ = fs::remove_file(&temp);
     match linked {
-        Ok(()) => Ok(key),
+        Ok(()) => sync_dir(dir).map(|()| key),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match stored(path, cipher)? {
             Stored::Loaded(bytes) => Ok(SecretKey::from_bytes(&bytes)),
             Stored::Missing | Stored::Replaced => Err(error),
@@ -95,11 +95,13 @@ fn create(dir: &Path, path: &Path, cipher: &dyn KeyCipher) -> io::Result<SecretK
 }
 
 fn replace(dir: &Path, path: &Path, cipher: &dyn KeyCipher) -> io::Result<SecretKey> {
-    let (key, sealed) = sealed_key(cipher)?;
-    let temp = write_temp(dir, &key, &sealed)?;
-    let renamed = fs::rename(&temp, path);
-    let _ = fs::remove_file(&temp);
-    renamed.map(|()| key)
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    sync_dir(dir)?;
+    create(dir, path, cipher)
 }
 
 fn sealed_key(cipher: &dyn KeyCipher) -> io::Result<(SecretKey, Vec<u8>)> {
@@ -134,6 +136,16 @@ fn corrupt(path: &Path, reason: &str) -> io::Error {
 }
 
 #[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
 fn create_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new()
@@ -165,29 +177,108 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
     use std::thread;
 
     use super::*;
 
-    struct FakeCipher(u8);
+    const FAKE_IV: usize = 12;
+    const FAKE_TAG: usize = 16;
+    static NEXT_KEY: AtomicU8 = AtomicU8::new(1);
+
+    struct FakeCipher {
+        key: Arc<Mutex<Option<u8>>>,
+        fail_seal: Arc<AtomicBool>,
+        open_error: Arc<Mutex<Option<io::ErrorKind>>>,
+    }
+
+    impl FakeCipher {
+        fn new() -> Self {
+            Self {
+                key: Arc::new(Mutex::new(None)),
+                fail_seal: Arc::new(AtomicBool::new(false)),
+                open_error: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn forget_key(&self) {
+            *self.key.lock().unwrap() = None;
+        }
+
+        fn rotate_key(&self) {
+            *self.key.lock().unwrap() = Some(NEXT_KEY.fetch_add(1, Ordering::SeqCst));
+        }
+
+        fn fail_next_seal(&self) {
+            self.fail_seal.store(true, Ordering::SeqCst);
+        }
+
+        fn fail_next_open(&self, kind: io::ErrorKind) {
+            *self.open_error.lock().unwrap() = Some(kind);
+        }
+    }
+
+    fn stream(id: u8, iv: &[u8], index: usize) -> u8 {
+        id.wrapping_mul(31)
+            .wrapping_add(iv[index % iv.len()])
+            .wrapping_add(index as u8)
+    }
+
+    fn fake_tag(id: u8, iv: &[u8], ciphertext: &[u8]) -> [u8; FAKE_TAG] {
+        let mut tag = [0u8; FAKE_TAG];
+        for (index, byte) in ciphertext.iter().enumerate() {
+            let slot = index % FAKE_TAG;
+            tag[slot] = tag[slot].wrapping_add(byte ^ stream(id, iv, index));
+        }
+        tag
+    }
+
+    fn fake_seal(id: u8, plaintext: &[u8]) -> Vec<u8> {
+        let iv: [u8; FAKE_IV] = std::array::from_fn(|index| id.wrapping_add(index as u8));
+        let ciphertext: Vec<u8> = plaintext
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ stream(id, &iv, index))
+            .collect();
+        let mut sealed = iv.to_vec();
+        sealed.extend_from_slice(&ciphertext);
+        sealed.extend_from_slice(&fake_tag(id, &iv, &ciphertext));
+        sealed
+    }
 
     impl KeyCipher for FakeCipher {
         fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
-            let mut sealed = vec![self.0];
-            sealed.extend(plaintext.iter().map(|byte| byte ^ self.0));
-            Ok(sealed)
+            let mut key = self.key.lock().unwrap();
+            let id = *key.get_or_insert_with(|| NEXT_KEY.fetch_add(1, Ordering::SeqCst));
+            if self.fail_seal.swap(false, Ordering::SeqCst) {
+                return Err(CipherError::Io(io::Error::other("the Keystore died")));
+            }
+            Ok(fake_seal(id, plaintext))
         }
 
         fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, CipherError> {
-            if sealed.len() != KEY_LEN + 1 {
+            if let Some(kind) = self.open_error.lock().unwrap().take() {
+                return Err(CipherError::Io(io::Error::from(kind)));
+            }
+            if sealed.len() < FAKE_IV + FAKE_TAG + 1 {
+                return Err(CipherError::Corrupt("the ciphertext is too short".into()));
+            }
+            let Some(id) = *self.key.lock().unwrap() else {
+                return Err(CipherError::KeyReplaced);
+            };
+            let (iv, rest) = sealed.split_at(FAKE_IV);
+            let (ciphertext, tag) = rest.split_at(rest.len() - FAKE_TAG);
+            if tag != fake_tag(id, iv, ciphertext) {
                 return Err(CipherError::Corrupt(
-                    "the ciphertext has the wrong length".into(),
+                    "the ciphertext failed authentication".into(),
                 ));
             }
-            if sealed[0] != self.0 {
-                return Err(CipherError::KeyReplaced);
-            }
-            Ok(sealed[1..].iter().map(|byte| byte ^ self.0).collect())
+            Ok(ciphertext
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ stream(id, iv, index))
+                .collect())
         }
     }
 
@@ -198,23 +289,25 @@ mod tests {
     #[test]
     fn creates_one_sealed_key_and_reuses_it() {
         let dir = temp();
-        let cipher = FakeCipher(1);
+        let cipher = FakeCipher::new();
         let first = load_or_create(dir.path(), &cipher).unwrap();
         let second = load_or_create(dir.path(), &cipher).unwrap();
         assert_eq!(first.to_bytes(), second.to_bytes());
         let sealed = fs::read(key_path(dir.path())).unwrap();
+        assert_eq!(sealed.len(), FAKE_IV + KEY_LEN + FAKE_TAG);
         assert_ne!(sealed, first.to_bytes().to_vec());
-        assert_eq!(sealed, cipher.seal(&first.to_bytes()).unwrap());
     }
 
     #[test]
     fn simultaneous_first_runs_agree_on_one_key() {
         let dir = Arc::new(temp());
+        let cipher = Arc::new(FakeCipher::new());
         let keys: Vec<[u8; 32]> = (0..8)
             .map(|_| {
                 let dir = dir.clone();
+                let cipher = cipher.clone();
                 thread::spawn(move || {
-                    load_or_create(dir.path(), &FakeCipher(1))
+                    load_or_create(dir.path(), cipher.as_ref())
                         .unwrap()
                         .to_bytes()
                 })
@@ -227,37 +320,83 @@ mod tests {
     }
 
     #[test]
-    fn refuses_corrupt_ciphertext() {
+    fn refuses_corrupt_ciphertext_and_leaves_it_alone() {
         let dir = temp();
         fs::create_dir_all(dir.path().join(KEY_DIR)).unwrap();
         fs::write(key_path(dir.path()), b"short").unwrap();
-        let error = load_or_create(dir.path(), &FakeCipher(1)).unwrap_err();
+        let error = load_or_create(dir.path(), &FakeCipher::new()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("not a readable key"));
+        assert_eq!(fs::read(key_path(dir.path())).unwrap(), b"short");
     }
 
     #[test]
-    fn a_replaced_keystore_key_makes_a_new_identity() {
+    fn a_missing_keystore_key_makes_a_new_identity() {
         let dir = temp();
-        let first = load_or_create(dir.path(), &FakeCipher(1)).unwrap();
-        let second = load_or_create(dir.path(), &FakeCipher(2)).unwrap();
+        let cipher = FakeCipher::new();
+        let first = load_or_create(dir.path(), &cipher).unwrap();
+        cipher.forget_key();
+        let second = load_or_create(dir.path(), &cipher).unwrap();
         assert_ne!(first.to_bytes(), second.to_bytes());
-        assert_eq!(
-            fs::read(key_path(dir.path())).unwrap(),
-            FakeCipher(2).seal(&second.to_bytes()).unwrap()
-        );
-        let third = load_or_create(dir.path(), &FakeCipher(2)).unwrap();
+        let third = load_or_create(dir.path(), &cipher).unwrap();
         assert_eq!(second.to_bytes(), third.to_bytes());
     }
 
     #[test]
-    fn a_reinstall_makes_a_new_identity() {
-        let first = temp();
-        let second = temp();
-        let cipher = FakeCipher(1);
-        let old = load_or_create(first.path(), &cipher).unwrap();
-        let new = load_or_create(second.path(), &cipher).unwrap();
-        assert_ne!(old.to_bytes(), new.to_bytes());
+    fn a_changed_keystore_key_is_corrupt_not_replaced() {
+        let dir = temp();
+        let cipher = FakeCipher::new();
+        load_or_create(dir.path(), &cipher).unwrap();
+        cipher.rotate_key();
+        let sealed = fs::read(key_path(dir.path())).unwrap();
+        let error = load_or_create(dir.path(), &cipher).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("failed authentication"));
+        assert_eq!(fs::read(key_path(dir.path())).unwrap(), sealed);
+    }
+
+    #[test]
+    fn keystore_errors_are_not_missing_or_replaced() {
+        let dir = temp();
+        let cipher = FakeCipher::new();
+        load_or_create(dir.path(), &cipher).unwrap();
+        let sealed = fs::read(key_path(dir.path())).unwrap();
+        cipher.fail_next_open(io::ErrorKind::PermissionDenied);
+        let error = load_or_create(dir.path(), &cipher).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(key_path(dir.path())).unwrap(), sealed);
+    }
+
+    #[test]
+    fn a_plaintext_that_is_not_32_bytes_is_corrupt() {
+        let dir = temp();
+        fs::create_dir_all(dir.path().join(KEY_DIR)).unwrap();
+        let cipher = FakeCipher::new();
+        fs::write(
+            key_path(dir.path()),
+            cipher.seal(&[1; KEY_LEN - 1]).unwrap(),
+        )
+        .unwrap();
+        let error = load_or_create(dir.path(), &cipher).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("32 bytes"));
+    }
+
+    #[test]
+    fn an_interrupted_rotation_leaves_no_unopenable_blob() {
+        let dir = temp();
+        let cipher = FakeCipher::new();
+        let first = load_or_create(dir.path(), &cipher).unwrap();
+        cipher.forget_key();
+        cipher.fail_next_seal();
+        assert!(load_or_create(dir.path(), &cipher).is_err());
+        assert!(!key_path(dir.path()).exists());
+        let second = load_or_create(dir.path(), &cipher).unwrap();
+        assert_ne!(first.to_bytes(), second.to_bytes());
+        assert_eq!(
+            load_or_create(dir.path(), &cipher).unwrap().to_bytes(),
+            second.to_bytes()
+        );
     }
 
     #[cfg(unix)]
@@ -265,7 +404,7 @@ mod tests {
     fn writes_the_ciphertext_and_its_folder_private() {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp();
-        load_or_create(dir.path(), &FakeCipher(1)).unwrap();
+        load_or_create(dir.path(), &FakeCipher::new()).unwrap();
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&key_path(dir.path())), 0o600);
         assert_eq!(mode(&dir.path().join(KEY_DIR)), 0o700);

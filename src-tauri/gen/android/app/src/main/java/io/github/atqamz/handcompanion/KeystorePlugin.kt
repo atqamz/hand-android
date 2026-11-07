@@ -2,6 +2,7 @@ package io.github.atqamz.handcompanion
 
 import android.app.Activity
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -10,6 +11,7 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.security.KeyStore
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -28,9 +30,7 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
   fun seal(invoke: Invoke) {
     try {
       val plaintext = invoke.parseArgs(KeyBytes::class.java).data.toByteArray()
-      val cipher = Cipher.getInstance(TRANSFORMATION)
-      cipher.init(Cipher.ENCRYPT_MODE, key(create = true))
-      invoke.resolve(response(cipher.iv + cipher.doFinal(plaintext)))
+      invoke.resolve(response(encrypt(plaintext)))
     } catch (error: Exception) {
       invoke.reject(error.message ?: "the Android Keystore could not encrypt the key", CODE_KEYSTORE)
     }
@@ -40,14 +40,18 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
   @Synchronized
   fun open(invoke: Invoke) {
     val sealed = invoke.parseArgs(KeyBytes::class.java).data.toByteArray()
-    if (sealed.size <= IV_BYTES) {
-      invoke.reject("the stored key is not ciphertext", CODE_CORRUPT)
+    if (sealed.size < IV_BYTES + TAG_BYTES + 1) {
+      invoke.reject("the stored key is not IV, ciphertext and tag", CODE_CORRUPT)
       return
     }
     val key = try {
       key(create = false)
+    } catch (error: KeyPermanentlyInvalidatedException) {
+      invoke.reject("the Android Keystore key that sealed the identity is gone", CODE_KEY_REPLACED)
+      return
     } catch (error: Exception) {
-      null
+      invoke.reject(error.message ?: "the Android Keystore could not read the key", CODE_KEYSTORE)
+      return
     }
     if (key == null) {
       invoke.reject("the Android Keystore key that sealed the identity is gone", CODE_KEY_REPLACED)
@@ -61,22 +65,51 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
         GCMParameterSpec(TAG_BITS, sealed.copyOfRange(0, IV_BYTES))
       )
       invoke.resolve(response(cipher.doFinal(sealed.copyOfRange(IV_BYTES, sealed.size))))
+    } catch (error: KeyPermanentlyInvalidatedException) {
+      invoke.reject("the Android Keystore key that sealed the identity is gone", CODE_KEY_REPLACED)
+    } catch (error: AEADBadTagException) {
+      invoke.reject("the stored key failed authentication", CODE_CORRUPT)
     } catch (error: Exception) {
-      invoke.reject(error.message ?: "the stored key is corrupt", CODE_CORRUPT)
+      invoke.reject(error.message ?: "the Android Keystore could not open the key", CODE_KEYSTORE)
     }
+  }
+
+  private fun encrypt(plaintext: ByteArray): ByteArray {
+    try {
+      return encryptOnce(plaintext)
+    } catch (error: KeyPermanentlyInvalidatedException) {
+      deleteKey()
+      return encryptOnce(plaintext)
+    }
+  }
+
+  private fun encryptOnce(plaintext: ByteArray): ByteArray {
+    val cipher = Cipher.getInstance(TRANSFORMATION)
+    cipher.init(Cipher.ENCRYPT_MODE, key(create = true))
+    require(cipher.iv.size == IV_BYTES) {
+      "the Android Keystore made a ${cipher.iv.size}-byte IV, not $IV_BYTES"
+    }
+    return cipher.iv + cipher.doFinal(plaintext)
   }
 
   private fun key(create: Boolean): SecretKey? {
     val store = KeyStore.getInstance(KEYSTORE)
     store.load(null)
-    val existing = try {
-      store.getKey(ALIAS, null) as? SecretKey
-    } catch (error: Exception) {
-      null
+    if (!store.containsAlias(ALIAS)) {
+      return if (create) generate(store) else null
     }
-    if (existing != null || !create) {
+    val existing = store.getKey(ALIAS, null) as? SecretKey
+    if (existing != null) {
       return existing
     }
+    if (!create) {
+      return null
+    }
+    store.deleteEntry(ALIAS)
+    return generate(store)
+  }
+
+  private fun generate(store: KeyStore): SecretKey {
     val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
     generator.init(
       KeyGenParameterSpec.Builder(
@@ -93,6 +126,12 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
     return store.getKey(ALIAS, null) as SecretKey
   }
 
+  private fun deleteKey() {
+    val store = KeyStore.getInstance(KEYSTORE)
+    store.load(null)
+    store.deleteEntry(ALIAS)
+  }
+
   private fun response(bytes: ByteArray): JSObject {
     val values = JSONArray()
     bytes.forEach { values.put(it.toInt() and 0xff) }
@@ -107,6 +146,7 @@ class KeystorePlugin(activity: Activity) : Plugin(activity) {
     const val TRANSFORMATION = "AES/GCM/NoPadding"
     const val KEY_BITS = 256
     const val TAG_BITS = 128
+    const val TAG_BYTES = TAG_BITS / 8
     const val IV_BYTES = 12
     const val CODE_KEY_REPLACED = "keyReplaced"
     const val CODE_CORRUPT = "corrupt"

@@ -111,7 +111,7 @@ If the Board answers with its login page, a pairing page, or a refusal such as "
 - `socket2` 0.6.5, tests only: sets `SO_LINGER` so the fixture Board can send the reset that becomes code 5.
 - `tauri` 2.12.5 and `tauri-build` 2.7.4: the Android shell and its build script, pinned with `tauri-cli` 2.12.4.
 - `tauri-plugin-opener` 2.7.2: sends a refused navigation and a clicked `_blank` link or `window.open` call to another origin, or with a `mailto:` or `tel:` scheme, to the Android system browser; neither the standard library nor Tauri starts that intent itself. Its `open_url` command is granted to the bundled page and to `http://localhost:*` by `src-tauri/capabilities/external-links.json`, and its link script is left on.
-- `com.google.zxing:core` 3.5.4 and `com.journeyapps:zxing-android-embedded` 4.3.0, Android: the QR decoder and the camera preview that feeds it. They add 458,236 B to the debug APK; the two artifacts are 610,364 and 151,839 B, about 0.76 MB together. They need no Google Play services; the embedded library's own `core` is excluded so the decoder is pinned directly. A hand-written camera loop would be more code for the same result.
+- `com.google.zxing:core` 3.5.4 and `com.journeyapps:zxing-android-embedded` 4.3.0, Android: the QR decoder and the camera preview that feeds it. They add 463,884 B to the debug APK; the two artifacts are 610,364 and 151,839 B, about 0.76 MB together. They need no Google Play services; the embedded library's own `core` is excluded so the decoder is pinned directly. A hand-written camera loop would be more code for the same result.
 
 `Cargo.lock` holds every transitive version.
 

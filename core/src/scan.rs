@@ -129,7 +129,8 @@ mod tests {
         const KOTLIN: &str = include_str!(
             "../../src-tauri/gen/android/app/src/main/java/io/github/atqamz/handcompanion/ScannerPlugin.kt"
         );
-        assert!(KOTLIN.contains(&format!("\"{SCAN_OPEN}\"")));
+        assert!(KOTLIN.contains(&format!("private const val SCAN_OPEN = \"{SCAN_OPEN}\"")));
+        assert!(KOTLIN.contains("invoke.reject(\"A scan is already open.\", SCAN_OPEN)"));
     }
 
     #[test]
